@@ -1,5 +1,3 @@
-# GitRocket-AI 🚀
-
 <div align="center">
 
 <img width="1144" height="200" alt="image" src="https://github.com/user-attachments/assets/f1a8715d-dfb6-49ab-ac09-3ba2cffdf2d8" />
@@ -308,4 +306,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 *Start your AI journey today with GitRocket-AI!*
 
 </div>
+
 
