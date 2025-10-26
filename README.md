@@ -2,7 +2,26 @@
 
 <div align="center">
 
-![GitRocket AI Logo](https://via.placeholder.com/800x200/000000/FFFFFF?text=GitRocket+AI+Terminal+Assistant)
+![GitRocket AI Logo](@@@@@@@*:   . ..   ...    -%@@@@@@
+@@@%=   .   ..   .       .  ..*%@@
+@#. ....    .::::-----:.  . .   :%
+      .  .---:-::::::::--:      ..
+  .   ::::-::..:::..:...-=- ..   .
+   . .-==-:::::...:---=----:   ...
+. .  .=***=:..:.--+****+=:-=:. .. 
+    ..+***=:....=*+==+*+---== ... 
+   ...-=+-:::..:.:--==---==++.    
+     .-==-=-:.:::.::-====+++=. .  
+..   ..---======-:::--==++++.  .  
+ .   . -+=:..:..--=+++==+*+:.. .  
+   .    -+=-::==+********+. . . . 
+     .    -*************=... .   .
+ .          :+********+:...     . 
+    ...       +**++=:      . .    
+  . .  ..  .  .----. . .. ... .   
+   ..    .... ..:.--. ....:.......
+..      .+**+*+==-==::-..:====:...
+   . ..    +====-:--===-:.-===+=--)
 
 **Access 52+ FREE AI Models | Built-in Diagnostics | API Debugger**
 
@@ -307,3 +326,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 *Start your AI journey today with GitRocket-AI!*
 
 </div>
+
