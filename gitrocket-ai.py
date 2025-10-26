@@ -8,28 +8,97 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+# Try to import Groq SDK
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    print("⚠️  Groq SDK not installed. Run: pip install groq")
+
 # Configuration
 CONFIG_DIR = Path.home() / '.config' / 'gitrocket_ai'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
 DEBUG_FILE = CONFIG_DIR / 'debug_log.json'
-MODELS_URL = "https://openrouter.ai/api/v1/models"
-API_KEY_URL = "https://openrouter.ai/keys"
 HISTORY_FILE = CONFIG_DIR / 'model_history.json'
+
+# Provider Configuration
+PROVIDERS = {
+    "openrouter": {
+        "name": "OpenRouter",
+        "models_url": "https://openrouter.ai/api/v1/models",
+        "api_url": "https://openrouter.ai/api/v1/chat/completions",
+        "api_key_url": "https://openrouter.ai/keys",
+        "free_suffix": ":free",
+        "headers": {
+            "Authorization": "Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/gitrocket-ai",
+            "X-Title": "GitRocket-AI"
+        }
+    },
+    "huggingface": {
+        "name": "Hugging Face",
+        "models_url": "https://huggingface.co/api/models?filter=text-generation-inference&sort=downloads",
+        "api_url": "https://api-inference.huggingface.co/models/{model}",
+        "api_key_url": "https://huggingface.co/settings/tokens",
+        "free_suffix": "",
+        "headers": {
+            "Authorization": "Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        "popular_models": [
+            "google/gemma-2-2b",
+            "microsoft/DialoGPT-large",
+            "microsoft/DialoGPT-medium",
+            "microsoft/DialoGPT-small",
+            "bert-base-uncased",
+            "gpt2",
+            "facebook/blenderbot-400M-distill",
+            "microsoft/DialogRPT-updown"
+        ]
+    },
+    "groq": {
+        "name": "Groq",
+        "models_url": "https://api.groq.com/openai/v1/models",
+        "api_url": "https://api.groq.com/openai/v1/chat/completions",
+        "api_key_url": "https://console.groq.com/keys",
+        "free_suffix": "",
+        "headers": {
+            "Authorization": "Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        "free_models": [
+            "llama2-70b-4096",
+            "mixtral-8x7b-32768",
+            "gemma-7b-it",
+            "llama-3.1-8b-instant",
+            "llama-3.2-1b-preview",
+            "llama-3.2-3b-preview"
+        ]
+    }
+}
 
 # Default configuration
 DEFAULT_CONFIG = {
     "api_key": "",
     "model": "deepseek/deepseek-r1-distill-qwen-7b:free",
     "api_url": "https://openrouter.ai/api/v1/chat/completions",
+    "provider": "openrouter",
     "max_tokens": 800,
     "temperature": 0.7,
     "debug_mode": False,
-    "debug_level": "basic"  # basic, detailed, full
+    "debug_level": "basic",
+    "provider_configs": {
+        "openrouter": {"api_key": ""},
+        "huggingface": {"api_key": ""},
+        "groq": {"api_key": ""}
+    }
 }
 
 # Rate limiting
 last_request_time = 0
-MIN_REQUEST_INTERVAL = 10  # Reduced to 10 seconds for testing
+MIN_REQUEST_INTERVAL = 10
 
 # Debugging
 debug_session = {
@@ -51,7 +120,15 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
             # Merge with defaults to ensure all keys exist
-            return {**DEFAULT_CONFIG, **config}
+            merged_config = {**DEFAULT_CONFIG, **config}
+            # Ensure provider_configs exists and has all providers
+            if "provider_configs" not in merged_config:
+                merged_config["provider_configs"] = DEFAULT_CONFIG["provider_configs"]
+            else:
+                for provider in DEFAULT_CONFIG["provider_configs"]:
+                    if provider not in merged_config["provider_configs"]:
+                        merged_config["provider_configs"][provider] = {"api_key": ""}
+            return merged_config
         except Exception as e:
             print(f"❌ Error loading config: {e}")
             return DEFAULT_CONFIG
@@ -63,11 +140,32 @@ def save_config(config):
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
-        os.chmod(CONFIG_FILE, 0o600)  # Secure file permissions
+        os.chmod(CONFIG_FILE, 0o600)
         return True
     except Exception as e:
         print(f"❌ Error saving config: {e}")
         return False
+
+def get_current_provider_config(config):
+    """Get current provider configuration"""
+    provider = config.get('provider', 'openrouter')
+    provider_config = config.get('provider_configs', {}).get(provider, {})
+    return provider, provider_config
+
+def get_current_api_key(config):
+    """Get API key for current provider"""
+    provider, provider_config = get_current_provider_config(config)
+    return provider_config.get('api_key', '')
+
+def set_current_api_key(config, api_key):
+    """Set API key for current provider"""
+    provider = config.get('provider', 'openrouter')
+    if 'provider_configs' not in config:
+        config['provider_configs'] = {}
+    if provider not in config['provider_configs']:
+        config['provider_configs'][provider] = {}
+    config['provider_configs'][provider]['api_key'] = api_key
+    return config
 
 def get_model_history():
     """Get recently used models"""
@@ -144,129 +242,292 @@ def log_debug_event(event_type, data, config):
     except Exception as e:
         print(f"❌ Debug log error: {e}")
 
-def check_connectivity():
-    """Check if we can reach OpenRouter"""
-    print("🔍 Checking connectivity to OpenRouter...")
+def check_connectivity(provider=None):
+    """Check if we can reach the provider"""
+    if provider is None:
+        provider = 'openrouter'
+    
+    provider_info = PROVIDERS[provider]
+    print(f"🔍 Checking connectivity to {provider_info['name']}...")
+    
+    test_urls = {
+        'openrouter': 'https://openrouter.ai',
+        'huggingface': 'https://huggingface.co',
+        'groq': 'https://groq.com'
+    }
+    
     try:
-        response = requests.get("https://openrouter.ai", timeout=10)
+        response = requests.get(test_urls[provider], timeout=10)
         print(f"📡 Connectivity: ✅ (Status {response.status_code})")
         return True
     except Exception as e:
-        print(f"❌ Cannot reach OpenRouter: {e}")
+        print(f"❌ Cannot reach {provider_info['name']}: {e}")
         return False
 
 def quick_api_test():
-    """Simple direct test of OpenRouter API"""
+    """Simple direct test of the current provider API"""
     config = load_config()
-    api_key = config.get('api_key', '')
+    provider = config.get('provider', 'openrouter')
+    api_key = get_current_api_key(config)
     
     if not api_key:
-        print("❌ No API key configured")
+        print("❌ No API key configured for current provider")
         return
     
-    print("\n🧪 Running direct API test...")
+    print(f"\n🧪 Running direct API test for {PROVIDERS[provider]['name']}...")
     
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/gitrocket-ai",
-        "X-Title": "GitRocket-AI Test"
-    }
-    
-    # Test with a very simple request
-    payload = {
-        "model": "google/gemma-2-9b-it:free",
-        "messages": [{"role": "user", "content": "Say 'TEST OK' only."}],
-        "max_tokens": 10,
-        "temperature": 0.1
-    }
-    
-    try:
-        print("📤 Sending test request...")
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        
-        print(f"📊 Status Code: {response.status_code}")
-        
-        if response.status_code == 200:
-            result = response.json()
-            content = result['choices'][0]['message']['content']
+    if provider == 'groq' and GROQ_AVAILABLE:
+        # Test Groq using their SDK
+        try:
+            client = Groq(api_key=api_key)
+            completion = client.chat.completions.create(
+                model="llama2-70b-4096",
+                messages=[{"role": "user", "content": "Say 'TEST OK' only."}],
+                temperature=0.1,
+                max_tokens=10
+            )
+            content = completion.choices[0].message.content
             print("✅ SUCCESS! Response:")
             print(f"   '{content}'")
             return True
-        elif response.status_code == 429:
-            retry_after = response.headers.get('Retry-After', 'unknown')
-            print(f"❌ RATE LIMITED - Retry after: {retry_after}s")
-            print(f"📋 Response: {response.text}")
-        else:
-            print(f"❌ FAILED - Status {response.status_code}")
-            print(f"📋 Full response: {response.text}")
+        except Exception as e:
+            print(f"❌ Groq API test failed: {e}")
+            return False
+    else:
+        # Test other providers using requests
+        headers = get_headers(provider, api_key)
+        
+        # Test with provider-specific payload
+        test_payloads = {
+            'openrouter': {
+                "model": "google/gemma-2-9b-it:free",
+                "messages": [{"role": "user", "content": "Say 'TEST OK' only."}],
+                "max_tokens": 10,
+                "temperature": 0.1
+            },
+            'huggingface': {
+                "inputs": "Say 'TEST OK' only.",
+                "parameters": {
+                    "max_new_tokens": 10,
+                    "temperature": 0.1,
+                    "return_full_text": False
+                }
+            },
+            'groq': {
+                "model": "llama2-70b-4096",
+                "messages": [{"role": "user", "content": "Say 'TEST OK' only."}],
+                "max_tokens": 10,
+                "temperature": 0.1
+            }
+        }
+        
+        try:
+            print("📤 Sending test request...")
             
-    except Exception as e:
-        print(f"❌ Exception: {e}")
+            if provider == 'huggingface':
+                # For Hugging Face, we need to use a specific model in the URL
+                test_model = "microsoft/DialoGPT-small"
+                api_url = PROVIDERS[provider]['api_url'].format(model=test_model)
+                payload = test_payloads[provider]
+            else:
+                api_url = PROVIDERS[provider]['api_url']
+                payload = test_payloads[provider]
+            
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            print(f"📊 Status Code: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                if provider == 'huggingface':
+                    content = result[0]['generated_text']
+                else:
+                    content = result['choices'][0]['message']['content']
+                print("✅ SUCCESS! Response:")
+                print(f"   '{content}'")
+                return True
+            elif response.status_code == 429:
+                retry_after = response.headers.get('Retry-After', 'unknown')
+                print(f"❌ RATE LIMITED - Retry after: {retry_after}s")
+                print(f"📋 Response: {response.text}")
+            else:
+                print(f"❌ FAILED - Status {response.status_code}")
+                print(f"📋 Full response: {response.text}")
+                
+        except Exception as e:
+            print(f"❌ Exception: {e}")
     
     return False
 
-def get_available_models(api_key):
-    """Fetch available models from OpenRouter - only show free models"""
+def get_headers(provider, api_key):
+    """Get headers for the specified provider"""
+    headers_template = PROVIDERS[provider]['headers']
+    headers = {}
+    for key, value in headers_template.items():
+        headers[key] = value.format(api_key=api_key)
+    return headers
+
+def get_detailed_model_description(model_id, provider):
+    """Get detailed descriptions for models"""
+    descriptions = {
+        # OpenRouter Models
+        "google/gemma-2-9b-it:free": "Gemma 2 9B Instruct is Google's lightweight, state-of-the-art open model built for text generation tasks. It excels at following instructions, answering questions, and engaging in conversational AI. With 9 billion parameters, it offers a great balance between performance and efficiency, making it ideal for various text-based applications.",
+        
+        "microsoft/wizardlm-2-8x22b:free": "WizardLM 2 8x22B is a massive language model with 176 billion parameters using mixture-of-experts architecture. It demonstrates exceptional performance in complex reasoning, coding tasks, and mathematical problem-solving. The model is particularly strong at following complex instructions and providing detailed, accurate responses.",
+        
+        "meta-llama/llama-3.1-8b-instruct:free": "Llama 3.1 8B Instruct is Meta's latest 8-billion parameter model optimized for instruction following. It features improved reasoning capabilities, better multilingual support, and enhanced safety features. Excellent for general chat, coding assistance, and creative writing tasks.",
+        
+        "mistralai/mistral-nemo:free": "Mistral Nemo is a versatile model designed for both chat and instruction following. It combines Mistral's efficient architecture with strong performance across various benchmarks. Particularly good at creative tasks, summarization, and general conversation.",
+        
+        "cognitivecomputations/dolphin3.0-mistral-24b:free": "Dolphin 3.0 Mistral 24B is an uncensored model fine-tuned for maximum helpfulness. It's designed to be less restrictive while maintaining quality, making it excellent for creative writing, roleplaying, and unfiltered conversations.",
+        
+        # Groq Models
+        "llama2-70b-4096": "Llama 2 70B running on Groq's lightning-fast LPU inference engine. This model delivers exceptional performance with 70 billion parameters, optimized for complex reasoning, coding, and detailed conversations. Groq's hardware acceleration makes it incredibly responsive.",
+        
+        "mixtral-8x7b-32768": "Mixtral 8x7B MoE model with 32K context length on Groq's platform. This mixture-of-experts model offers excellent performance across diverse tasks including coding, writing, and analysis. The large context window allows for extensive conversations and document processing.",
+        
+        "gemma-7b-it": "Google's Gemma 7B Instruct model optimized for Groq's hardware. A lightweight but capable model perfect for quick responses, chat applications, and general AI assistance with fast inference times.",
+        
+        "llama-3.1-8b-instant": "Meta's Llama 3.1 8B model running on Groq for instant responses. Balanced performance with quick inference, ideal for real-time applications and responsive chat interfaces.",
+        
+        "llama-3.2-1b-preview": "Ultra-fast 1B parameter model from Meta's Llama 3.2 series. Designed for maximum speed and efficiency while maintaining reasonable quality for simple tasks and quick interactions.",
+        
+        "llama-3.2-3b-preview": "Lightweight 3B parameter model offering a great balance between speed and capability. Perfect for applications requiring both responsiveness and decent reasoning abilities.",
+        
+        # Hugging Face Models
+        "microsoft/DialoGPT-large": "Microsoft's large-scale conversational AI model trained on Reddit discussions. Excellent for engaging in natural, multi-turn conversations with human-like responses and good contextual understanding.",
+        
+        "microsoft/DialoGPT-medium": "Medium-sized version of DialoGPT, balancing performance and efficiency. Well-suited for chat applications requiring coherent and contextually appropriate responses.",
+        
+        "microsoft/DialoGPT-small": "Compact version of DialoGPT for fast inference. Ideal for applications where response speed is crucial while maintaining reasonable conversation quality.",
+        
+        "facebook/blenderbot-400M-distill": "Facebook's distilled BlenderBot model optimized for engaging conversations. Trained on a diverse dataset to handle various topics while being computationally efficient.",
+        
+        "google/gemma-2-2b": "Google's ultra-lightweight Gemma 2 model with 2 billion parameters. Perfect for resource-constrained environments while still offering decent performance for basic text generation tasks.",
+        
+        "bert-base-uncased": "Classic BERT model for understanding and generating text. While primarily a encoder model, it can be used for various NLP tasks including question answering and text classification.",
+        
+        "gpt2": "The original GPT-2 model from OpenAI. A foundational transformer model that started the modern LLM revolution, capable of coherent text generation and creative writing.",
+        
+        "microsoft/DialogRPT-updown": "DialogRPT model trained to predict upvotes/downvotes for responses. Useful for generating engaging and well-received conversational responses."
+    }
+    
+    # Return the specific description or a generic one
+    if model_id in descriptions:
+        return descriptions[model_id]
+    else:
+        # Generate a generic description based on model characteristics
+        if 'llama' in model_id.lower():
+            return f"{model_id} is part of Meta's Llama family of language models, known for strong performance across various tasks including conversation, coding, and reasoning. This model offers a balance of capability and efficiency."
+        elif 'gemma' in model_id.lower():
+            return f"{model_id} is from Google's Gemma family of lightweight, open language models. It's designed to be efficient while maintaining strong performance for instruction following and text generation tasks."
+        elif 'mistral' in model_id.lower():
+            return f"{model_id} utilizes Mistral AI's efficient architecture, known for delivering strong performance with optimized resource usage. Excellent for various natural language processing tasks."
+        elif 'gpt' in model_id.lower():
+            return f"{model_id} is based on the GPT architecture, capable of generating coherent and contextually relevant text across a wide range of topics and applications."
+        else:
+            return f"{model_id} is a capable language model suitable for various text generation and understanding tasks. It can handle conversation, content creation, and information processing effectively."
+
+def get_available_models(provider, api_key):
+    """Fetch available models from the specified provider"""
     try:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
+        headers = get_headers(provider, api_key)
+        models_url = PROVIDERS[provider]['models_url']
         
         start_time = time.time()
-        response = requests.get(MODELS_URL, headers=headers, timeout=10)
-        response_time = time.time() - start_time
         
-        # Log API call for debugging
-        log_debug_event("models_request", {
-            "url": MODELS_URL,
-            "headers": {k: "***" if "Authorization" in k else v for k, v in headers.items()},
-            "response_time": response_time,
-            "status_code": response.status_code
-        }, {"debug_mode": True, "debug_level": "basic"})
-        
-        if response.status_code == 200:
+        if provider == 'huggingface':
+            # Hugging Face has a different API structure
+            response = requests.get(models_url, timeout=15)
             models_data = response.json()
+            
+            # Filter for popular text generation models
             models = []
-            for model in models_data.get('data', []):
+            for model in models_data:
                 model_id = model.get('id', '')
-                # Only include models that have ":free" at the end
-                if model_id.endswith(':free'):
+                # Include popular models and some free ones
+                if (model_id in PROVIDERS[provider]['popular_models'] or 
+                    any(keyword in model_id.lower() for keyword in ['gpt', 'dialo', 'blender', 'bert'])):
                     models.append({
                         'id': model_id,
-                        'name': model.get('name', model_id),
-                        'description': model.get('description', ''),
-                        'context_length': model.get('context_length', 'Unknown'),
-                        'pricing': model.get('pricing', {})
+                        'name': model_id.split('/')[-1],
+                        'description': get_detailed_model_description(model_id, provider),
+                        'context_length': 2048,  # Default
+                        'pricing': {'prompt': 0, 'completion': 0}
                     })
+            return models[:50]  # Limit to top 50
+            
+        elif provider == 'groq':
+            # Groq uses OpenAI-compatible API
+            models = []
+            for model_id in PROVIDERS[provider]['free_models']:
+                models.append({
+                    'id': model_id,
+                    'name': model_id,
+                    'description': get_detailed_model_description(model_id, provider),
+                    'context_length': 4096 if '32768' in model_id else 8192 if '4096' in model_id else 2048,
+                    'pricing': {'prompt': 0, 'completion': 0}
+                })
             return models
-        else:
-            print(f"❌ Error fetching models: {response.status_code}")
-            return []
+                
+        else:  # openrouter
+            response = requests.get(models_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                models_data = response.json()
+                models = []
+                for model in models_data.get('data', []):
+                    model_id = model.get('id', '')
+                    if model_id.endswith(PROVIDERS[provider]['free_suffix']):
+                        models.append({
+                            'id': model_id,
+                            'name': model.get('name', model_id),
+                            'description': get_detailed_model_description(model_id, provider),
+                            'context_length': model.get('context_length', 'Unknown'),
+                            'pricing': model.get('pricing', {})
+                        })
+                return models
+            else:
+                print(f"❌ Error fetching {provider} models: {response.status_code}")
+                return []
+                
     except Exception as e:
-        print(f"❌ Error fetching models: {e}")
-        log_debug_event("models_error", {"error": str(e)}, {"debug_mode": True, "debug_level": "basic"})
+        print(f"❌ Error fetching {provider} models: {e}")
         return []
 
-def get_reliable_free_models():
-    """Return a list of known reliable free models"""
-    return [
-        "google/gemma-2-9b-it:free",
-        "microsoft/wizardlm-2-8x22b:free", 
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "mistralai/mistral-nemo:free",
-        "cognitivecomputations/dolphin3.0-mistral-24b:free"
-    ]
+def get_reliable_free_models(provider):
+    """Return a list of known reliable free models for the provider"""
+    reliable_models = {
+        'openrouter': [
+            "google/gemma-2-9b-it:free",
+            "microsoft/wizardlm-2-8x22b:free", 
+            "meta-llama/llama-3.1-8b-instruct:free",
+            "mistralai/mistral-nemo:free",
+            "cognitivecomputations/dolphin3.0-mistral-24b:free"
+        ],
+        'huggingface': [
+            "microsoft/DialoGPT-medium",
+            "microsoft/DialoGPT-small",
+            "facebook/blenderbot-400M-distill",
+            "google/gemma-2-2b"
+        ],
+        'groq': [
+            "llama2-70b-4096",
+            "mixtral-8x7b-32768",
+            "gemma-7b-it",
+            "llama-3.1-8b-instant"
+        ]
+    }
+    return reliable_models.get(provider, [])
 
 def switch_to_reliable_model(config):
-    """Switch to a known reliable model"""
-    reliable_models = get_reliable_free_models()
+    """Switch to a known reliable model for current provider"""
+    provider = config.get('provider', 'openrouter')
+    reliable_models = get_reliable_free_models(provider)
     current_model = config['model']
     
     if current_model in reliable_models:
@@ -278,29 +539,27 @@ def switch_to_reliable_model(config):
                 return config
     
     # If all else fails, use the first reliable model
-    config['model'] = reliable_models[0]
-    print(f"🔄 Switching to reliable model: {reliable_models[0]}")
+    if reliable_models:
+        config['model'] = reliable_models[0]
+        print(f"🔄 Switching to reliable model: {reliable_models[0]}")
     return config
 
-def display_model_info(model, index):
+def display_model_info(model, index, provider):
     """Display model information with appealing formatting"""
     model_id = model['id']
     context = model['context_length']
-    description = model['description'] or "No description available"
+    description = model['description']
     
-    # Color code based on model provider
-    if 'google' in model_id:
-        color = "\033[1;34m"  # Blue for Google
-    elif 'meta' in model_id or 'llama' in model_id:
-        color = "\033[1;33m"  # Yellow for Meta/Llama
-    elif 'microsoft' in model_id:
-        color = "\033[1;32m"  # Green for Microsoft
-    elif 'mistral' in model_id:
-        color = "\033[1;35m"  # Magenta for Mistral
-    else:
-        color = "\033[1;36m"  # Cyan for others
+    # Color code based on provider
+    color_codes = {
+        'openrouter': "\033[1;34m",   # Blue
+        'huggingface': "\033[1;33m",  # Yellow
+        'groq': "\033[1;35m"          # Magenta
+    }
+    color = color_codes.get(provider, "\033[1;36m")
     
     print(f"{color}┌─ {index}. {model_id}\033[0m")
+    print(f"\033[1;90m│   Provider: {PROVIDERS[provider]['name']}\033[0m")
     print(f"\033[1;90m│   Context: {context} tokens\033[0m")
     
     # Format description with word wrapping
@@ -308,7 +567,7 @@ def display_model_info(model, index):
     words = description.split()
     current_line = ""
     for word in words:
-        if len(current_line + " " + word) <= 80:
+        if len(current_line + " " + word) <= 70:  # Slightly narrower for better readability
             current_line += " " + word if current_line else word
         else:
             desc_lines.append(current_line)
@@ -317,11 +576,14 @@ def display_model_info(model, index):
         desc_lines.append(current_line)
     
     if desc_lines:
-        print(f"\033[1;97m│   Description: {desc_lines[0]}\033[0m")
-        for line in desc_lines[1:]:
-            print(f"\033[1;97m│                 {line}\033[0m")
+        print(f"\033[1;97m│   Description:\033[0m")
+        for i, line in enumerate(desc_lines):
+            if i == 0:
+                print(f"\033[1;97m│     {line}\033[0m")
+            else:
+                print(f"\033[1;97m│     {line}\033[0m")
     
-    # Show pricing info if available
+    # Show pricing info
     pricing = model.get('pricing', {})
     if pricing.get('prompt') == 0 and pricing.get('completion') == 0:
         print(f"\033[1;92m│   💰 Price: FREE\033[0m")
@@ -334,19 +596,40 @@ def display_model_info(model, index):
     print("")
 
 def interactive_model_browser(config):
-    """Interactive model browser with filtering and search"""
+    """Interactive model browser with provider selection"""
     print("\033[1;36m")
     print("┌─────────────────────────────────────────────────────┐")
     print("│ 🔍 Interactive Model Browser │")
     print("└─────────────────────────────────────────────────────┘")
     print("\033[0m")
     
-    print("⏳ Loading available models...")
-    models = get_available_models(config['api_key'])
+    # Provider selection
+    print("Select AI Provider:\n")
+    providers = list(PROVIDERS.keys())
+    for i, provider in enumerate(providers, 1):
+        print(f"\033[1;36m{i}. {PROVIDERS[provider]['name']}\033[0m")
+    print("")
+    
+    provider_choice = input("Select provider (1-3): ").strip()
+    if not provider_choice.isdigit() or not (1 <= int(provider_choice) <= 3):
+        print("❌ Invalid provider selection")
+        return config
+    
+    selected_provider = providers[int(provider_choice) - 1]
+    api_key = config.get('provider_configs', {}).get(selected_provider, {}).get('api_key', '')
+    
+    if not api_key:
+        print(f"❌ No API key configured for {PROVIDERS[selected_provider]['name']}")
+        print(f"💡 Please set up the API key in settings first")
+        return config
+    
+    print(f"⏳ Loading available models from {PROVIDERS[selected_provider]['name']}...")
+    models = get_available_models(selected_provider, api_key)
     if not models:
         print("❌ Could not fetch models.")
         return config
     
+    # Continue with the existing browser logic but for the selected provider
     filtered_models = models
     current_page = 0
     models_per_page = 5
@@ -354,7 +637,7 @@ def interactive_model_browser(config):
     while True:
         print("\033[1;36m")
         print("┌─────────────────────────────────────────────────────┐")
-        print(f"│ 📋 Models ({len(filtered_models)} found) - Page {current_page + 1} │")
+        print(f"│ 📋 {PROVIDERS[selected_provider]['name']} Models ({len(filtered_models)} found) - Page {current_page + 1} │")
         print("└─────────────────────────────────────────────────────┘")
         print("\033[0m")
         
@@ -363,7 +646,7 @@ def interactive_model_browser(config):
         end_idx = min(start_idx + models_per_page, len(filtered_models))
         
         for i in range(start_idx, end_idx):
-            display_model_info(filtered_models[i], i + 1)
+            display_model_info(filtered_models[i], i + 1, selected_provider)
         
         # Show navigation info
         print(f"\033[1;33mShowing {start_idx + 1}-{end_idx} of {len(filtered_models)} models\033[0m")
@@ -375,9 +658,6 @@ def interactive_model_browser(config):
         print(" • \033[1;36mn\033[0m - Next page")
         print(" • \033[1;36mp\033[0m - Previous page") 
         print(" • \033[1;36ms [term]\033[0m - Search models")
-        print(" • \033[1;36mf free\033[0m - Show only free models")
-        print(" • \033[1;36mf all\033[0m - Show all models")
-        print(" • \033[1;36mr\033[0m - Reset filters")
         print(" • \033[1;36mc\033[0m - Cancel")
         print("")
         
@@ -402,35 +682,20 @@ def interactive_model_browser(config):
                              search_term in (m.get('description', '').lower())]
             current_page = 0
             print(f"🔍 Found {len(filtered_models)} models matching '{search_term}'")
-        elif choice == 'f free':
-            filtered_models = [m for m in models if m['id'].endswith(':free')]
-            current_page = 0
-            print(f"💰 Showing {len(filtered_models)} free models")
-        elif choice == 'f all':
-            filtered_models = models
-            current_page = 0
-            print("📋 Showing all models")
-        elif choice == 'r':
-            filtered_models = models
-            current_page = 0
-            print("🔄 Filters reset")
         elif choice.isdigit():
             model_index = int(choice) - 1
             if 0 <= model_index < len(filtered_models):
                 selected_model = filtered_models[model_index]
                 config['model'] = selected_model['id']
+                config['provider'] = selected_provider
+                config['api_url'] = PROVIDERS[selected_provider]['api_url']
+                if selected_provider == 'huggingface':
+                    config['api_url'] = config['api_url'].format(model=selected_model['id'])
+                
                 save_model_history(selected_model['id'])
                 print(f"✅ Selected: \033[1;32m{selected_model['id']}\033[0m")
+                print(f"✅ Provider: \033[1;32m{PROVIDERS[selected_provider]['name']}\033[0m")
                 
-                # Show confirmation with model details
-                print("\n\033[1;36m" + "─" * 50 + "\033[0m")
-                print(f"\033[1;94m🎯 Model Activated:\033[0m")
-                print(f"   \033[1;36mName:\033[0m {selected_model['id']}")
-                if selected_model['description']:
-                    desc = selected_model['description'][:100] + "..." if len(selected_model['description']) > 100 else selected_model['description']
-                    print(f"   \033[1;36mAbout:\033[0m {desc}")
-                print(f"   \033[1;36mContext:\033[0m {selected_model['context_length']} tokens")
-                print("\033[1;36m" + "─" * 50 + "\033[0m")
                 return config
             else:
                 print("❌ Invalid model number")
@@ -439,7 +704,95 @@ def interactive_model_browser(config):
         
         print("")
 
-def get_model_recommendations(models):
+def change_provider(config):
+    """Change the current AI provider"""
+    print("\033[1;36m")
+    print("┌─────────────────────────────────────────────────────┐")
+    print("│ 🔄 Change AI Provider │")
+    print("└─────────────────────────────────────────────────────┘")
+    print("\033[0m")
+    
+    print("Select AI Provider:\n")
+    providers = list(PROVIDERS.keys())
+    for i, provider in enumerate(providers, 1):
+        provider_name = PROVIDERS[provider]['name']
+        has_key = bool(config.get('provider_configs', {}).get(provider, {}).get('api_key', ''))
+        status = "✅ Configured" if has_key else "❌ Needs API Key"
+        print(f"\033[1;36m{i}. {provider_name} - {status}\033[0m")
+        print(f"   {PROVIDERS[provider]['api_key_url']}")
+    print("")
+    
+    choice = input("Select provider (1-3): ").strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= 3):
+        print("❌ Invalid provider selection")
+        return config
+    
+    selected_provider = providers[int(choice) - 1]
+    api_key = config.get('provider_configs', {}).get(selected_provider, {}).get('api_key', '')
+    
+    if not api_key:
+        print(f"❌ No API key configured for {PROVIDERS[selected_provider]['name']}")
+        setup_api_key = input("Would you like to set it up now? (y/N): ").strip().lower()
+        if setup_api_key == 'y':
+            config = setup_provider_api_key(config, selected_provider)
+        else:
+            return config
+    
+    # Set the provider and update model to a reliable one
+    config['provider'] = selected_provider
+    config['api_url'] = PROVIDERS[selected_provider]['api_url']
+    
+    # Set a reliable model for the provider
+    reliable_models = get_reliable_free_models(selected_provider)
+    if reliable_models:
+        config['model'] = reliable_models[0]
+        if selected_provider == 'huggingface':
+            config['api_url'] = config['api_url'].format(model=reliable_models[0])
+    
+    print(f"✅ Switched to {PROVIDERS[selected_provider]['name']}")
+    print(f"✅ Model: {config['model']}")
+    
+    return config
+
+def setup_provider_api_key(config, provider):
+    """Set up API key for a specific provider"""
+    print(f"\n🔑 Setting up {PROVIDERS[provider]['name']} API Key")
+    print(f"📋 Get your API key from: {PROVIDERS[provider]['api_key_url']}")
+    print("")
+    
+    while True:
+        api_key = input(f"Enter your {PROVIDERS[provider]['name']} API key: ").strip()
+        if api_key:
+            print("⏳ Testing API key...")
+            
+            if provider == 'groq' and GROQ_AVAILABLE:
+                # Test Groq using SDK
+                try:
+                    client = Groq(api_key=api_key)
+                    # Try to list models or make a simple call
+                    models = client.models.list()
+                    print("✅ API key validated successfully!")
+                    if 'provider_configs' not in config:
+                        config['provider_configs'] = {}
+                    config['provider_configs'][provider] = {'api_key': api_key}
+                    return config
+                except Exception as e:
+                    print(f"❌ Invalid Groq API key: {e}")
+            else:
+                # Test other providers
+                models = get_available_models(provider, api_key)
+                if models or provider == 'huggingface':  # Hugging Face might not return models immediately
+                    print("✅ API key validated successfully!")
+                    if 'provider_configs' not in config:
+                        config['provider_configs'] = {}
+                    config['provider_configs'][provider] = {'api_key': api_key}
+                    return config
+                else:
+                    print("❌ Invalid API key or network error. Please try again.")
+        else:
+            print("❌ API key cannot be empty.")
+
+def get_model_recommendations(models, provider):
     """Get recommended models based on use case"""
     recommendations = {
         "💬 Chat & Conversation": [],
@@ -454,11 +807,11 @@ def get_model_recommendations(models):
         desc = (model.get('description') or '').lower()
         
         # Categorize models
-        if any(word in model_id + desc for word in ['chat', 'conversation', 'instruct']):
+        if any(word in model_id + desc for word in ['chat', 'conversation', 'instruct', 'dialo', 'blender']):
             recommendations["💬 Chat & Conversation"].append(model)
         elif any(word in model_id + desc for word in ['write', 'content', 'creative', 'story']):
             recommendations["📝 Writing & Content"].append(model)
-        elif any(word in model_id + desc for word in ['reason', 'analysis', 'logic', 'math']):
+        elif any(word in model_id + desc for word in ['reason', 'analysis', 'logic', 'math', 'wizard']):
             recommendations["🔍 Analysis & Reasoning"].append(model)
         elif any(word in model_id + desc for word in ['code', 'program', 'technical', 'developer']):
             recommendations["💻 Coding & Technical"].append(model)
@@ -475,11 +828,13 @@ def show_model_recommendations(config):
     print("└─────────────────────────────────────────────────────┘")
     print("\033[0m")
     
-    models = get_available_models(config['api_key'])
+    provider = config.get('provider', 'openrouter')
+    api_key = get_current_api_key(config)
+    models = get_available_models(provider, api_key)
     if not models:
         return config
     
-    recommendations = get_model_recommendations(models)
+    recommendations = get_model_recommendations(models, provider)
     
     print("🤔 What will you primarily use the AI for?\n")
     
@@ -506,7 +861,7 @@ def show_model_recommendations(config):
         for i, model in enumerate(category_models[:3], 1):
             print(f"\033[1;36m{i}. {model['id']}\033[0m")
             if model['description']:
-                desc = model['description'][:80] + "..." if len(model['description']) > 80 else model['description']
+                desc = model['description'][:100] + "..." if len(model['description']) > 100 else model['description']
                 print(f"   \033[1;90m{desc}\033[0m")
             print(f"   \033[1;33mContext: {model['context_length']} tokens\033[0m")
             print("")
@@ -574,13 +929,14 @@ def change_model(config):
         return interactive_model_browser(config)
     elif choice == '3':
         # Quick pick from reliable models
-        reliable_models = get_reliable_free_models()
-        print("\n\033[1;32m⚡ Reliable Models:\033[0m\n")
+        provider = config.get('provider', 'openrouter')
+        reliable_models = get_reliable_free_models(provider)
+        print(f"\n\033[1;32m⚡ Reliable {PROVIDERS[provider]['name']} Models:\033[0m\n")
         for i, model in enumerate(reliable_models, 1):
             print(f"\033[1;36m{i}. {model}\033[0m")
         print("")
-        model_choice = input("Select model (1-5): ").strip()
-        if model_choice.isdigit() and 1 <= int(model_choice) <= 5:
+        model_choice = input(f"Select model (1-{len(reliable_models)}): ").strip()
+        if model_choice.isdigit() and 1 <= int(model_choice) <= len(reliable_models):
             config['model'] = reliable_models[int(model_choice) - 1]
             save_model_history(config['model'])
             print(f"✅ Selected: \033[1;32m{config['model']}\033[0m")
@@ -592,22 +948,29 @@ def change_model(config):
         print("❌ Invalid choice")
         return config
 
-def request_api_key():
-    """Display API key request information"""
-    print("\033[1;36m")
+def request_api_key(provider='openrouter'):
+    """Display API key request information for specific provider"""
+    provider_info = PROVIDERS[provider]
+    print(f"\033[1;36m")
     print("┌─────────────────────────────────────────────────────┐")
-    print("│ 🔑 Request API Key │")
+    print(f"│ 🔑 Request {provider_info['name']} API Key │")
     print("└─────────────────────────────────────────────────────┘")
     print("\033[0m")
-    print("To use this application, you need an OpenRouter API key.")
+    print(f"To use {provider_info['name']}, you need an API key.")
     print("")
     print("\033[1;33m📋 Steps to get your API key:\033[0m")
-    print("1. Visit: \033[1;34mhttps://openrouter.ai/keys\033[0m")
+    print(f"1. Visit: \033[1;34m{provider_info['api_key_url']}\033[0m")
     print("2. Sign up or log in to your account")
     print("3. Create a new API key")
     print("4. Copy the key and enter it when prompted")
     print("")
-    print("\033[1;32m💡 Tip: The API key typically starts with 'sk-' followed by a long string of characters\033[0m")
+    
+    if provider == 'huggingface':
+        print("💡 For Hugging Face, you might not need an API key for some models,")
+        print("   but having one gives you higher rate limits.")
+    elif provider == 'groq':
+        print("💡 Groq offers free tier with rate limits.")
+    
     print("")
     input("Press Enter to continue...")
 
@@ -619,27 +982,47 @@ def setup_wizard():
     print("└─────────────────────────────────────────────────────┘")
     print("\033[0m")
     print("Welcome to GitRocket-AI Terminal Assistant!")
-    print("Let's get you set up...")
+    print("Now supporting multiple AI providers!")
     print("")
     config = load_config()
     
-    # API Key Setup with option to request one
-    print("\033[1;33m📋 Step 1: API Key Setup\033[0m")
-    print("You need an OpenRouter API key to use this application.")
-    print("")
+    # Provider Selection
+    print("\033[1;33m📋 Step 1: Select AI Provider\033[0m")
+    print("Choose which AI service you want to use:\n")
+    
+    providers = list(PROVIDERS.keys())
+    for i, provider in enumerate(providers, 1):
+        print(f"\033[1;36m{i}. {PROVIDERS[provider]['name']}\033[0m")
+        if provider == 'openrouter':
+            print("   - Access to 100+ models including free ones")
+        elif provider == 'huggingface':
+            print("   - Direct access to open-source models")
+        elif provider == 'groq':
+            print("   - Ultra-fast inference with free tier")
+        print("")
+    
+    provider_choice = input("Select provider (1-3): ").strip()
+    if not provider_choice.isdigit() or not (1 <= int(provider_choice) <= 3):
+        print("❌ Invalid provider selection, using OpenRouter as default")
+        selected_provider = 'openrouter'
+    else:
+        selected_provider = providers[int(provider_choice) - 1]
+    
+    config['provider'] = selected_provider
+    
+    # API Key Setup
+    print(f"\n\033[1;33m📋 Step 2: {PROVIDERS[selected_provider]['name']} API Key Setup\033[0m")
     
     while True:
-        print("Do you already have an OpenRouter API key?")
+        print(f"Do you already have a {PROVIDERS[selected_provider]['name']} API key?")
         print("1. Yes, I have an API key")
         print("2. No, I need to get one")
         choice = input("Select option (1-2): ").strip()
         
         if choice == '1':
-            # User has API key - proceed with input
             break
         elif choice == '2':
-            # User needs API key - show request info
-            request_api_key()
+            request_api_key(selected_provider)
             print("")
             print("Let's continue with setup...")
             print("")
@@ -647,24 +1030,13 @@ def setup_wizard():
             print("❌ Invalid option. Please select 1 or 2.")
     
     # Get API Key
-    while True:
-        api_key = input("🔑 Enter your OpenRouter API key: ").strip()
-        if api_key:
-            # Test the API key by fetching models
-            print("⏳ Testing API key...")
-            models = get_available_models(api_key)
-            if models:
-                print("✅ API key validated successfully!")
-                config['api_key'] = api_key
-                break
-            else:
-                print("❌ Invalid API key or network error. Please try again.")
-        else:
-            print("❌ API key cannot be empty.")
+    config = setup_provider_api_key(config, selected_provider)
+    if not config:
+        return config
     
-    # Model Selection using enhanced interface
+    # Model Selection
     print("")
-    print("\033[1;33m📋 Step 2: Model Selection\033[0m")
+    print("\033[1;33m📋 Step 3: Model Selection\033[0m")
     config = change_model(config)
     
     # Save configuration
@@ -764,9 +1136,11 @@ def display_intro():
     print("")
 
 def display_chat_header(config):
-    """Display chat session header"""
+    """Display chat session header with provider info"""
+    provider = config.get('provider', 'openrouter')
     print("\033[1;34m" + "─" * 80 + "\033[0m")
     print("\033[1;92m" + " " * 28 + "💬 Chat Session Started" + " " * 28 + "\033[0m")
+    print(f"\033[1;37m" + " " * 25 + f"Provider: {PROVIDERS[provider]['name']}" + " " * 25 + "\033[0m")
     print(f"\033[1;37m" + " " * 25 + f"Model: {config['model']}" + " " * 25 + "\033[0m")
     print("\033[1;34m" + "─" * 80 + "\033[0m")
     print("")
@@ -792,93 +1166,68 @@ def display_thinking():
     print("")
 
 def change_api_key(config):
-    """Change the API key"""
-    print("\033[1;36m")
+    """Change the API key for current provider"""
+    provider = config.get('provider', 'openrouter')
+    print(f"\033[1;36m")
     print("┌─────────────────────────────────────────────────────┐")
-    print("│ 🔑 Change API Key │")
-    print("└─────────────────────────────────────────────────────┘")
-    print("\033[0m")
-    while True:
-        api_key = input("Enter your new OpenRouter API key: ").strip()
-        if api_key:
-            print("⏳ Testing API key...")
-            models = get_available_models(api_key)
-            if models:
-                print("✅ API key validated successfully!")
-                config['api_key'] = api_key
-                return config
-            else:
-                print("❌ Invalid API key or network error. Please try again.")
-        else:
-            print("❌ API key cannot be empty.")
-
-def api_debugger(config):
-    """Comprehensive API Debugger"""
-    print("\033[1;36m")
-    print("┌─────────────────────────────────────────────────────┐")
-    print("│ 🐛 API Debugger │")
+    print(f"│ 🔑 Change {PROVIDERS[provider]['name']} API Key │")
     print("└─────────────────────────────────────────────────────┘")
     print("\033[0m")
     
-    if not config['api_key']:
-        print("❌ No API key configured")
+    return setup_provider_api_key(config, provider)
+
+def api_debugger(config):
+    """Comprehensive API Debugger for current provider"""
+    provider = config.get('provider', 'openrouter')
+    print(f"\033[1;36m")
+    print("┌─────────────────────────────────────────────────────┐")
+    print(f"│ 🐛 {PROVIDERS[provider]['name']} API Debugger │")
+    print("└─────────────────────────────────────────────────────┘")
+    print("\033[0m")
+    
+    api_key = get_current_api_key(config)
+    if not api_key:
+        print("❌ No API key configured for current provider")
         return
     
     print("🔍 Running diagnostic tests...")
     print("")
     
     # Test 1: Connectivity
-    print("1. 📡 Network Connectivity...", end=" ")
-    if check_connectivity():
-        print("✅ Connected to OpenRouter")
+    print(f"1. 📡 Network Connectivity...", end=" ")
+    if check_connectivity(provider):
+        print(f"✅ Connected to {PROVIDERS[provider]['name']}")
     else:
-        print("❌ Cannot reach OpenRouter")
+        print(f"❌ Cannot reach {PROVIDERS[provider]['name']}")
         return
     
-    # Test 2: API Key Format
-    print("2. 🔑 API Key Format Check...", end=" ")
-    if config['api_key'].startswith('sk-'):
-        print("✅ Valid format (starts with 'sk-')")
+    # Test 2: API Key
+    print(f"2. 🔑 API Key Check...", end=" ")
+    if provider == 'groq' and GROQ_AVAILABLE:
+        try:
+            client = Groq(api_key=api_key)
+            models = client.models.list()
+            print(f"✅ API key is valid")
+        except Exception as e:
+            print(f"❌ API key validation failed: {e}")
     else:
-        print("❌ Invalid format (should start with 'sk-')")
+        models = get_available_models(provider, api_key)
+        if models or provider == 'huggingface':  # Hugging Face might be lenient
+            print(f"✅ API key is valid")
+        else:
+            print(f"❌ API key validation failed")
     
-    # Test 3: Models Endpoint
-    print("3. 📋 Models API Test...", end=" ")
-    models = get_available_models(config['api_key'])
-    if models:
-        print(f"✅ Success! Found {len(models)} free models")
-    else:
-        print("❌ Failed to fetch models")
-    
-    # Test 4: Quick Chat Test
-    print("4. 💬 Quick API Test...")
+    # Test 3: Quick Chat Test
+    print(f"3. 💬 Quick API Test...")
     if quick_api_test():
         print("   ✅ API is working correctly!")
     else:
         print("   ❌ API test failed")
     
-    # Test 5: Configuration Check
-    print("5. ⚙️ Configuration Check...", end=" ")
-    issues = []
-    if not config['api_key']:
-        issues.append("Missing API key")
-    if not config['model']:
-        issues.append("Missing model")
-    if config['max_tokens'] > 8000:
-        issues.append("Max tokens too high")
-    if not 0 <= config['temperature'] <= 2:
-        issues.append("Temperature out of range (0-2)")
-    
-    if not issues:
-        print("✅ All settings valid")
-    else:
-        print("❌ Issues found:")
-        for issue in issues:
-            print(f"   - {issue}")
-    
-    # Display Debug Info
+    # Display current configuration
     print("")
-    print("\033[1;33m📊 Debug Information:\033[0m")
+    print("\033[1;33m📊 Current Configuration:\033[0m")
+    print(f"   Provider: {PROVIDERS[provider]['name']}")
     print(f"   API URL: {config['api_url']}")
     print(f"   Model: {config['model']}")
     print(f"   Max Tokens: {config['max_tokens']}")
@@ -965,7 +1314,10 @@ def clear_debug_log():
 def chat_with_ai(message, conversation_history, config):
     global last_request_time
     
-    print("🔍 Debug: Starting API call...")
+    provider = config.get('provider', 'openrouter')
+    api_key = get_current_api_key(config)
+    
+    print(f"🔍 Debug: Starting API call to {PROVIDERS[provider]['name']}...")
     
     # Add new message to conversation history
     conversation_history.append({"role": "user", "content": message})
@@ -981,80 +1333,115 @@ def chat_with_ai(message, conversation_history, config):
     
     last_request_time = time.time()
     
-    headers = {
-        "Authorization": f"Bearer {config['api_key']}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/gitrocket-ai",
-        "X-Title": "GitRocket-AI Terminal Chat"
-    }
-    
-    # Conservative payload for free tier
-    payload = {
-        "model": config['model'],
-        "messages": conversation_history[-3:],  # Only last 3 messages
-        "max_tokens": min(config.get('max_tokens', 800), 500),  # Max 500 tokens
-        "temperature": config.get('temperature', 0.7)
-    }
-    
     # Log the API request for debugging
     log_debug_event("api_request", {
-        "headers": {k: "***" if "Authorization" in k else v for k, v in headers.items()},
-        "payload": payload,
-        "conversation_length": len(conversation_history)
+        "provider": provider,
+        "conversation_length": len(conversation_history),
+        "message": message[:100] + "..." if len(message) > 100 else message
     }, config)
     
     try:
         start_time = time.time()
-        print("📤 Sending request to OpenRouter...")
-        response = requests.post(config['api_url'], headers=headers, json=payload, timeout=60)
-        response_time = time.time() - start_time
         
-        print(f"📊 Received response: HTTP {response.status_code}")
-        
-        # Log the API response
-        log_debug_event("api_response", {
-            "status_code": response.status_code,
-            "response_time": response_time,
-            "headers": dict(response.headers)
-        }, config)
-        
-        if response.status_code == 429:
-            # Rate limited
-            retry_after = response.headers.get('Retry-After', 30)
-            try:
-                retry_after = int(retry_after)
-            except:
-                retry_after = 30
+        if provider == 'groq' and GROQ_AVAILABLE:
+            # Use Groq SDK
+            print(f"📤 Sending request to {PROVIDERS[provider]['name']}...")
+            client = Groq(api_key=api_key)
+            
+            completion = client.chat.completions.create(
+                model=config['model'],
+                messages=conversation_history[-3:],  # Only last 3 messages
+                temperature=config.get('temperature', 0.7),
+                max_tokens=min(config.get('max_tokens', 800), 2000),
+                stream=False
+            )
+            
+            response_time = time.time() - start_time
+            assistant_message = completion.choices[0].message.content
+            
+        else:
+            # Use requests for other providers
+            headers = get_headers(provider, api_key)
+            
+            # Provider-specific payload
+            if provider == 'huggingface':
+                # Hugging Face uses a different format
+                payload = {
+                    "inputs": message,
+                    "parameters": {
+                        "max_new_tokens": min(config.get('max_tokens', 800), 500),
+                        "temperature": config.get('temperature', 0.7),
+                        "return_full_text": False
+                    }
+                }
+                api_url = config['api_url']
+            else:
+                # OpenRouter and Groq (fallback) use OpenAI-compatible format
+                payload = {
+                    "model": config['model'],
+                    "messages": conversation_history[-3:],  # Only last 3 messages
+                    "max_tokens": min(config.get('max_tokens', 800), 500),
+                    "temperature": config.get('temperature', 0.7)
+                }
+                api_url = config['api_url']
+            
+            print(f"📤 Sending request to {PROVIDERS[provider]['name']}...")
+            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+            response_time = time.time() - start_time
+            
+            print(f"📊 Received response: HTTP {response.status_code}")
+            
+            # Log the API response
+            log_debug_event("api_response", {
+                "provider": provider,
+                "status_code": response.status_code,
+                "response_time": response_time,
+                "headers": dict(response.headers)
+            }, config)
+            
+            if response.status_code == 429:
+                # Rate limited
+                retry_after = response.headers.get('Retry-After', 30)
+                try:
+                    retry_after = int(retry_after)
+                except:
+                    retry_after = 30
+                    
+                log_debug_event("api_error", {
+                    "error": f"Rate limited - retry after {retry_after}s", 
+                    "status_code": 429,
+                    "retry_after": retry_after
+                }, config)
                 
-            log_debug_event("api_error", {
-                "error": f"Rate limited - retry after {retry_after}s", 
-                "status_code": 429,
-                "retry_after": retry_after
-            }, config)
+                # Remove the last user message since it failed
+                conversation_history.pop()
+                
+                return f"⚠️ Rate limited. Please wait {retry_after} seconds.\n💡 Try running 'test' command to diagnose.", conversation_history
             
-            # Remove the last user message since it failed
-            conversation_history.pop()
+            elif response.status_code == 400:
+                error_msg = response.json().get('error', {}).get('message', 'Bad request')
+                log_debug_event("api_error", {
+                    "error": error_msg,
+                    "status_code": 400
+                }, config)
+                
+                # Remove the last user message since it failed
+                conversation_history.pop()
+                
+                return f"❌ API Error: {error_msg}", conversation_history
             
-            return f"⚠️ Rate limited. Please wait {retry_after} seconds.\n💡 Try running 'test' command to diagnose.", conversation_history
-        
-        elif response.status_code == 400:
-            error_msg = response.json().get('error', {}).get('message', 'Bad request')
-            log_debug_event("api_error", {
-                "error": error_msg,
-                "status_code": 400
-            }, config)
+            response.raise_for_status()
+            result = response.json()
             
-            # Remove the last user message since it failed
-            conversation_history.pop()
-            
-            return f"❌ API Error: {error_msg}", conversation_history
-        
-        response.raise_for_status()
-        result = response.json()
-        assistant_message = result['choices'][0]['message']['content']
+            # Extract response based on provider
+            if provider == 'huggingface':
+                assistant_message = result[0]['generated_text']
+            else:
+                assistant_message = result['choices'][0]['message']['content']
         
         # Log successful response
         log_debug_event("api_success", {
+            "provider": provider,
             "content_length": len(assistant_message),
             "response_time": response_time
         }, config)
@@ -1065,21 +1452,43 @@ def chat_with_ai(message, conversation_history, config):
         
     except requests.exceptions.Timeout:
         error_msg = "❌ Request timeout - API is very busy"
-        log_debug_event("api_error", {"error": "Request timeout"}, config)
+        log_debug_event("api_error", {"error": "Request timeout", "provider": provider}, config)
         # Remove the last user message since it failed
         conversation_history.pop()
         return error_msg, conversation_history
         
     except Exception as e:
         error_msg = f"❌ Error: {e}"
-        log_debug_event("api_error", {"error": str(e)}, config)
+        log_debug_event("api_error", {"error": str(e), "provider": provider}, config)
         # Remove the last user message since it failed
         conversation_history.pop()
         return error_msg, conversation_history
 
+def setup_all_provider_keys(config):
+    """Set up API keys for all providers"""
+    print("\033[1;36m")
+    print("┌─────────────────────────────────────────────────────┐")
+    print("│ 🔑 Setup All Provider API Keys │")
+    print("└─────────────────────────────────────────────────────┘")
+    print("\033[0m")
+    
+    for provider in PROVIDERS:
+        print(f"\n📋 Setting up {PROVIDERS[provider]['name']}...")
+        current_key = config.get('provider_configs', {}).get(provider, {}).get('api_key', '')
+        
+        if current_key:
+            change = input(f"{PROVIDERS[provider]['name']} API key already configured. Change it? (y/N): ").strip().lower()
+            if change != 'y':
+                continue
+        
+        config = setup_provider_api_key(config, provider)
+    
+    return config
+
 def show_settings(config):
-    """Show and update settings with a menu - Enhanced with debug options"""
+    """Show and update settings with a menu - Enhanced with multi-provider support"""
     while True:
+        provider = config.get('provider', 'openrouter')
         print("\033[1;36m")
         print("┌─────────────────────────────────────────────────────┐")
         print("│ ⚙️ Settings Menu │")
@@ -1087,36 +1496,42 @@ def show_settings(config):
         print("\033[0m")
         
         print("Current Settings:")
-        print(f"1. Model: {config['model']}")
-        print(f"2. API Key: {'*' * 20}{config['api_key'][-4:] if config['api_key'] else 'Not set'}")
-        print(f"3. Max Tokens: {config['max_tokens']}")
-        print(f"4. Temperature: {config['temperature']}")
-        print(f"5. Debug Mode: {config.get('debug_mode', False)}")
-        print(f"6. Debug Level: {config.get('debug_level', 'basic')}")
+        print(f"1. Provider: {PROVIDERS[provider]['name']}")
+        print(f"2. Model: {config['model']}")
+        print(f"3. API Key: {'*' * 20}{get_current_api_key(config)[-4:] if get_current_api_key(config) else 'Not set'}")
+        print(f"4. Max Tokens: {config['max_tokens']}")
+        print(f"5. Temperature: {config['temperature']}")
+        print(f"6. Debug Mode: {config.get('debug_mode', False)}")
+        print(f"7. Debug Level: {config.get('debug_level', 'basic')}")
         print("")
         
         print("Options:")
-        print("1. Change Model")
-        print("2. Change API Key")
-        print("3. Change Max Tokens")
-        print("4. Change Temperature")
-        print("5. Toggle Debug Mode")
-        print("6. Change Debug Level")
-        print("7. API Debugger")
-        print("8. View Debug Log")
-        print("9. Clear Debug Log")
-        print("10. Switch to Reliable Model")
-        print("11. Request API Key")
-        print("12. Back to Chat")
+        print("1. Change AI Provider")
+        print("2. Change Model")
+        print("3. Change API Key (Current Provider)")
+        print("4. Setup All Provider API Keys")
+        print("5. Change Max Tokens")
+        print("6. Change Temperature")
+        print("7. Toggle Debug Mode")
+        print("8. Change Debug Level")
+        print("9. API Debugger")
+        print("10. View Debug Log")
+        print("11. Clear Debug Log")
+        print("12. Switch to Reliable Model")
+        print("13. Back to Chat")
         print("")
         
-        choice = input("Select option (1-12): ").strip()
+        choice = input("Select option (1-13): ").strip()
         
         if choice == '1':
-            config = change_model(config)
+            config = change_provider(config)
         elif choice == '2':
-            config = change_api_key(config)
+            config = change_model(config)
         elif choice == '3':
+            config = change_api_key(config)
+        elif choice == '4':
+            config = setup_all_provider_keys(config)
+        elif choice == '5':
             try:
                 new_tokens = int(input(f"Enter new max tokens (current: {config['max_tokens']}): "))
                 if 1 <= new_tokens <= 4000:
@@ -1126,7 +1541,7 @@ def show_settings(config):
                     print("❌ Max tokens must be between 1 and 4000 for free models.")
             except ValueError:
                 print("❌ Please enter a valid number.")
-        elif choice == '4':
+        elif choice == '6':
             try:
                 new_temp = float(input(f"Enter new temperature (current: {config['temperature']}): "))
                 if 0 <= new_temp <= 2:
@@ -1136,11 +1551,11 @@ def show_settings(config):
                     print("❌ Temperature must be between 0 and 2.")
             except ValueError:
                 print("❌ Please enter a valid number.")
-        elif choice == '5':
+        elif choice == '7':
             config['debug_mode'] = not config.get('debug_mode', False)
             status = "enabled" if config['debug_mode'] else "disabled"
             print(f"✅ Debug mode {status}")
-        elif choice == '6':
+        elif choice == '8':
             print("Debug Levels:")
             print("1. basic - Minimal logging")
             print("2. detailed - More detailed logging")
@@ -1152,20 +1567,18 @@ def show_settings(config):
                 print(f"✅ Debug level set to: {config['debug_level']}")
             else:
                 print("❌ Invalid choice")
-        elif choice == '7':
-            api_debugger(config)
-        elif choice == '8':
-            view_debug_log(config)
         elif choice == '9':
-            clear_debug_log()
+            api_debugger(config)
         elif choice == '10':
-            config = switch_to_reliable_model(config)
+            view_debug_log(config)
         elif choice == '11':
-            request_api_key()
+            clear_debug_log()
         elif choice == '12':
+            config = switch_to_reliable_model(config)
+        elif choice == '13':
             return config
         else:
-            print("❌ Invalid option. Please select 1-12.")
+            print("❌ Invalid option. Please select 1-13.")
         
         # Save after each change
         if save_config(config):
@@ -1189,10 +1602,10 @@ def interactive_chat():
     
     # Load or setup configuration
     config = load_config()
-    if not config['api_key']:
+    if not get_current_api_key(config):
         print("🔧 First-time setup required...")
         config = setup_wizard()
-        if not config['api_key']:
+        if not get_current_api_key(config):
             print("❌ Setup failed. Please run the script again.")
             return
     
