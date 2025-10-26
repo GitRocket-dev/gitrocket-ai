@@ -2,14 +2,8 @@
 
 <div align="center">
 
-```bash
-        .__  __                        __           __                   .__ 
-   ____ |__|/  |________  ____   ____ |  | __ _____/  |_          _____  |__|
-  / ___\|  \   __\_  __ \/  _ \_/ ___\|  |/ // __ \   __\  ______ \__  \ |  |
- / /_/  >  ||  |  |  | \(  <_> )  \___|    <\  ___/|  |   /_____/  / __ \|  |
- \___  /|__||__|  |__|   \____/ \___  >__|_ \\___  >__|           (____  /__|
-/_____/                             \/     \/    \/                    \/    
-```
+<img width="1144" height="200" alt="image" src="https://github.com/user-attachments/assets/f1a8715d-dfb6-49ab-ac09-3ba2cffdf2d8" />
+
 
 **Access 52+ FREE AI Models | Built-in Diagnostics | API Debugger**
 
@@ -314,3 +308,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 *Start your AI journey today with GitRocket-AI!*
 
 </div>
+
