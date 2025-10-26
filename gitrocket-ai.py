@@ -14,6 +14,7 @@ CONFIG_FILE = CONFIG_DIR / 'config.json'
 DEBUG_FILE = CONFIG_DIR / 'debug_log.json'
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 API_KEY_URL = "https://openrouter.ai/keys"
+HISTORY_FILE = CONFIG_DIR / 'model_history.json'
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -66,6 +67,41 @@ def save_config(config):
         return True
     except Exception as e:
         print(f"❌ Error saving config: {e}")
+        return False
+
+def get_model_history():
+    """Get recently used models"""
+    ensure_config_dir()
+    if HISTORY_FILE.exists():
+        try:
+            with open(HISTORY_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_model_history(model_id):
+    """Save model to history"""
+    ensure_config_dir()
+    history = get_model_history()
+    
+    # Remove if already exists
+    history = [m for m in history if m['id'] != model_id]
+    
+    # Add to beginning
+    history.insert(0, {
+        'id': model_id,
+        'last_used': datetime.now().isoformat()
+    })
+    
+    # Keep only last 10
+    history = history[:10]
+    
+    try:
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+        return True
+    except:
         return False
 
 def log_debug_event(event_type, data, config):
@@ -246,6 +282,316 @@ def switch_to_reliable_model(config):
     print(f"🔄 Switching to reliable model: {reliable_models[0]}")
     return config
 
+def display_model_info(model, index):
+    """Display model information with appealing formatting"""
+    model_id = model['id']
+    context = model['context_length']
+    description = model['description'] or "No description available"
+    
+    # Color code based on model provider
+    if 'google' in model_id:
+        color = "\033[1;34m"  # Blue for Google
+    elif 'meta' in model_id or 'llama' in model_id:
+        color = "\033[1;33m"  # Yellow for Meta/Llama
+    elif 'microsoft' in model_id:
+        color = "\033[1;32m"  # Green for Microsoft
+    elif 'mistral' in model_id:
+        color = "\033[1;35m"  # Magenta for Mistral
+    else:
+        color = "\033[1;36m"  # Cyan for others
+    
+    print(f"{color}┌─ {index}. {model_id}\033[0m")
+    print(f"\033[1;90m│   Context: {context} tokens\033[0m")
+    
+    # Format description with word wrapping
+    desc_lines = []
+    words = description.split()
+    current_line = ""
+    for word in words:
+        if len(current_line + " " + word) <= 80:
+            current_line += " " + word if current_line else word
+        else:
+            desc_lines.append(current_line)
+            current_line = word
+    if current_line:
+        desc_lines.append(current_line)
+    
+    if desc_lines:
+        print(f"\033[1;97m│   Description: {desc_lines[0]}\033[0m")
+        for line in desc_lines[1:]:
+            print(f"\033[1;97m│                 {line}\033[0m")
+    
+    # Show pricing info if available
+    pricing = model.get('pricing', {})
+    if pricing.get('prompt') == 0 and pricing.get('completion') == 0:
+        print(f"\033[1;92m│   💰 Price: FREE\033[0m")
+    else:
+        prompt_price = pricing.get('prompt', '?')
+        completion_price = pricing.get('completion', '?')
+        print(f"\033[1;93m│   💰 Price: ${prompt_price}/1M tokens\033[0m")
+    
+    print("\033[1;90m└─────────────────────────────────────────────────────────────────\033[0m")
+    print("")
+
+def interactive_model_browser(config):
+    """Interactive model browser with filtering and search"""
+    print("\033[1;36m")
+    print("┌─────────────────────────────────────────────────────┐")
+    print("│ 🔍 Interactive Model Browser │")
+    print("└─────────────────────────────────────────────────────┘")
+    print("\033[0m")
+    
+    print("⏳ Loading available models...")
+    models = get_available_models(config['api_key'])
+    if not models:
+        print("❌ Could not fetch models.")
+        return config
+    
+    filtered_models = models
+    current_page = 0
+    models_per_page = 5
+    
+    while True:
+        print("\033[1;36m")
+        print("┌─────────────────────────────────────────────────────┐")
+        print(f"│ 📋 Models ({len(filtered_models)} found) - Page {current_page + 1} │")
+        print("└─────────────────────────────────────────────────────┘")
+        print("\033[0m")
+        
+        # Display current page
+        start_idx = current_page * models_per_page
+        end_idx = min(start_idx + models_per_page, len(filtered_models))
+        
+        for i in range(start_idx, end_idx):
+            display_model_info(filtered_models[i], i + 1)
+        
+        # Show navigation info
+        print(f"\033[1;33mShowing {start_idx + 1}-{end_idx} of {len(filtered_models)} models\033[0m")
+        print("")
+        
+        # Show commands
+        print("\033[1;94mNavigation:\033[0m")
+        print(" • \033[1;36m[number]\033[0m - Select model")
+        print(" • \033[1;36mn\033[0m - Next page")
+        print(" • \033[1;36mp\033[0m - Previous page") 
+        print(" • \033[1;36ms [term]\033[0m - Search models")
+        print(" • \033[1;36mf free\033[0m - Show only free models")
+        print(" • \033[1;36mf all\033[0m - Show all models")
+        print(" • \033[1;36mr\033[0m - Reset filters")
+        print(" • \033[1;36mc\033[0m - Cancel")
+        print("")
+        
+        choice = input("\033[1;35mChoose action: \033[0m").strip().lower()
+        
+        if choice == 'c':
+            print("Model selection cancelled.")
+            return config
+        elif choice == 'n':
+            if end_idx < len(filtered_models):
+                current_page += 1
+            else:
+                print("❌ Already on last page")
+        elif choice == 'p':
+            if current_page > 0:
+                current_page -= 1
+            else:
+                print("❌ Already on first page")
+        elif choice.startswith('s '):
+            search_term = choice[2:].lower()
+            filtered_models = [m for m in models if search_term in m['id'].lower() or 
+                             search_term in (m.get('description', '').lower())]
+            current_page = 0
+            print(f"🔍 Found {len(filtered_models)} models matching '{search_term}'")
+        elif choice == 'f free':
+            filtered_models = [m for m in models if m['id'].endswith(':free')]
+            current_page = 0
+            print(f"💰 Showing {len(filtered_models)} free models")
+        elif choice == 'f all':
+            filtered_models = models
+            current_page = 0
+            print("📋 Showing all models")
+        elif choice == 'r':
+            filtered_models = models
+            current_page = 0
+            print("🔄 Filters reset")
+        elif choice.isdigit():
+            model_index = int(choice) - 1
+            if 0 <= model_index < len(filtered_models):
+                selected_model = filtered_models[model_index]
+                config['model'] = selected_model['id']
+                save_model_history(selected_model['id'])
+                print(f"✅ Selected: \033[1;32m{selected_model['id']}\033[0m")
+                
+                # Show confirmation with model details
+                print("\n\033[1;36m" + "─" * 50 + "\033[0m")
+                print(f"\033[1;94m🎯 Model Activated:\033[0m")
+                print(f"   \033[1;36mName:\033[0m {selected_model['id']}")
+                if selected_model['description']:
+                    desc = selected_model['description'][:100] + "..." if len(selected_model['description']) > 100 else selected_model['description']
+                    print(f"   \033[1;36mAbout:\033[0m {desc}")
+                print(f"   \033[1;36mContext:\033[0m {selected_model['context_length']} tokens")
+                print("\033[1;36m" + "─" * 50 + "\033[0m")
+                return config
+            else:
+                print("❌ Invalid model number")
+        else:
+            print("❌ Invalid command")
+        
+        print("")
+
+def get_model_recommendations(models):
+    """Get recommended models based on use case"""
+    recommendations = {
+        "💬 Chat & Conversation": [],
+        "📝 Writing & Content": [], 
+        "🔍 Analysis & Reasoning": [],
+        "💻 Coding & Technical": [],
+        "🌐 Multilingual": []
+    }
+    
+    for model in models:
+        model_id = model['id'].lower()
+        desc = (model.get('description') or '').lower()
+        
+        # Categorize models
+        if any(word in model_id + desc for word in ['chat', 'conversation', 'instruct']):
+            recommendations["💬 Chat & Conversation"].append(model)
+        elif any(word in model_id + desc for word in ['write', 'content', 'creative', 'story']):
+            recommendations["📝 Writing & Content"].append(model)
+        elif any(word in model_id + desc for word in ['reason', 'analysis', 'logic', 'math']):
+            recommendations["🔍 Analysis & Reasoning"].append(model)
+        elif any(word in model_id + desc for word in ['code', 'program', 'technical', 'developer']):
+            recommendations["💻 Coding & Technical"].append(model)
+        elif any(word in model_id + desc for word in ['multilingual', 'translate', 'language']):
+            recommendations["🌐 Multilingual"].append(model)
+    
+    return recommendations
+
+def show_model_recommendations(config):
+    """Show models by category with recommendations"""
+    print("\033[1;36m")
+    print("┌─────────────────────────────────────────────────────┐")
+    print("│ 🎯 Model Recommendations │")
+    print("└─────────────────────────────────────────────────────┘")
+    print("\033[0m")
+    
+    models = get_available_models(config['api_key'])
+    if not models:
+        return config
+    
+    recommendations = get_model_recommendations(models)
+    
+    print("🤔 What will you primarily use the AI for?\n")
+    
+    categories = list(recommendations.keys())
+    for i, category in enumerate(categories, 1):
+        count = len(recommendations[category])
+        if count > 0:
+            print(f"\033[1;36m{i}. {category} ({count} models)\033[0m")
+    
+    print("\n\033[1;36m0. Show all models\033[0m")
+    print("")
+    
+    choice = input("Select category (0-5): ").strip()
+    
+    if choice == '0':
+        return interactive_model_browser(config)
+    elif choice.isdigit() and 1 <= int(choice) <= len(categories):
+        selected_category = categories[int(choice) - 1]
+        category_models = recommendations[selected_category]
+        
+        print(f"\n\033[1;32m🎯 {selected_category} - Top Models:\033[0m\n")
+        
+        # Show top 3 models from this category
+        for i, model in enumerate(category_models[:3], 1):
+            print(f"\033[1;36m{i}. {model['id']}\033[0m")
+            if model['description']:
+                desc = model['description'][:80] + "..." if len(model['description']) > 80 else model['description']
+                print(f"   \033[1;90m{desc}\033[0m")
+            print(f"   \033[1;33mContext: {model['context_length']} tokens\033[0m")
+            print("")
+        
+        if len(category_models) > 3:
+            print(f"\033[1;90m... and {len(category_models) - 3} more models in this category\033[0m")
+            print("")
+        
+        use_browser = input("Browse all models in this category? (y/N): ").strip().lower()
+        if use_browser == 'y':
+            # Create a modified config for the browser with filtered models
+            temp_config = config.copy()
+            return interactive_model_browser(temp_config)
+        else:
+            # Let user pick from top 3
+            model_choice = input("Select model (1-3) or 'b' to browse all: ").strip().lower()
+            if model_choice.isdigit() and 1 <= int(model_choice) <= 3:
+                selected_model = category_models[int(model_choice) - 1]
+                config['model'] = selected_model['id']
+                save_model_history(selected_model['id'])
+                print(f"✅ Selected: \033[1;32m{selected_model['id']}\033[0m")
+                return config
+            elif model_choice == 'b':
+                return interactive_model_browser(config)
+    
+    return config
+
+def change_model(config):
+    """Enhanced model selection with multiple interfaces"""
+    print("\033[1;36m")
+    print("┌─────────────────────────────────────────────────────┐")
+    print("│ 🤖 Model Selection │")
+    print("└─────────────────────────────────────────────────────┘")
+    print("\033[0m")
+    
+    # Show recently used models
+    history = get_model_history()
+    if history:
+        print("\033[1;33m🕐 Recently Used Models:\033[0m")
+        for i, model in enumerate(history[:3], 1):
+            print(f"   \033[1;36m{i}. {model['id']}\033[0m")
+        print("")
+    
+    print("Choose your model selection interface:\n")
+    print("\033[1;36m1. 🎯 Smart Recommendations\033[0m")
+    print("   - Get models tailored to your use case")
+    print("   - Perfect for beginners")
+    print("")
+    print("\033[1;36m2. 🔍 Interactive Browser\033[0m") 
+    print("   - Browse all models with search & filters")
+    print("   - Great for power users")
+    print("")
+    print("\033[1;36m3. ⚡ Quick Pick\033[0m")
+    print("   - Choose from reliable, tested models")
+    print("   - Fast and simple")
+    print("")
+    print("\033[1;36m4. ↩️  Cancel\033[0m")
+    print("")
+    
+    choice = input("Select interface (1-4): ").strip()
+    
+    if choice == '1':
+        return show_model_recommendations(config)
+    elif choice == '2':
+        return interactive_model_browser(config)
+    elif choice == '3':
+        # Quick pick from reliable models
+        reliable_models = get_reliable_free_models()
+        print("\n\033[1;32m⚡ Reliable Models:\033[0m\n")
+        for i, model in enumerate(reliable_models, 1):
+            print(f"\033[1;36m{i}. {model}\033[0m")
+        print("")
+        model_choice = input("Select model (1-5): ").strip()
+        if model_choice.isdigit() and 1 <= int(model_choice) <= 5:
+            config['model'] = reliable_models[int(model_choice) - 1]
+            save_model_history(config['model'])
+            print(f"✅ Selected: \033[1;32m{config['model']}\033[0m")
+        return config
+    elif choice == '4':
+        print("Model selection cancelled.")
+        return config
+    else:
+        print("❌ Invalid choice")
+        return config
+
 def request_api_key():
     """Display API key request information"""
     print("\033[1;36m")
@@ -316,52 +662,10 @@ def setup_wizard():
         else:
             print("❌ API key cannot be empty.")
     
-    # Model Selection
+    # Model Selection using enhanced interface
     print("")
     print("\033[1;33m📋 Step 2: Model Selection\033[0m")
-    print("Fetching available FREE models...")
-    models = get_available_models(api_key)
-    
-    if not models:
-        print("❌ Could not fetch models. Using default.")
-        config['model'] = DEFAULT_CONFIG['model']
-    else:
-        print("")
-        print("Available FREE models:")
-        print("")
-        for i, model in enumerate(models[:10], 1):  # Show only first 10 for brevity
-            print(f"\033[1;36m{i}. {model['id']}\033[0m")
-            print(f"\033[1;33m Context: {model['context_length']} tokens\033[0m")
-            if model['description']:
-                desc = model['description']
-                if len(desc) > 70:
-                    desc = desc[:67] + "..."
-                print(f"\033[0;97m Description: {desc}\033[0m")
-            print("")
-        
-        while True:
-            try:
-                choice = input(f"Select model (1-{len(models[:10])}) or 'r' for reliable models: ").strip().lower()
-                if choice == 'r':
-                    # Show reliable models
-                    reliable_models = get_reliable_free_models()
-                    print("\n🔧 Reliable Models:")
-                    for i, model in enumerate(reliable_models, 1):
-                        print(f"   {i}. {model}")
-                    rel_choice = input("Select reliable model (1-5): ").strip()
-                    if rel_choice.isdigit() and 1 <= int(rel_choice) <= 5:
-                        config['model'] = reliable_models[int(rel_choice) - 1]
-                        print(f"✅ Selected: {config['model']}")
-                        break
-                elif choice.isdigit() and 1 <= int(choice) <= len(models[:10]):
-                    selected_model = models[int(choice) - 1]
-                    config['model'] = selected_model['id']
-                    print(f"✅ Selected: {selected_model['id']}")
-                    break
-                else:
-                    print(f"❌ Please enter a number between 1 and {len(models[:10])} or 'r'")
-            except (ValueError, IndexError):
-                print("❌ Invalid selection.")
+    config = change_model(config)
     
     # Save configuration
     print("")
@@ -376,79 +680,73 @@ def setup_wizard():
 
 def display_intro():
     """Display the GitRocket AI logo and intro"""
+    # Center the ASCII art
+    art_lines = [
+        "@@@@@@@@@@@@@%*:  .           . .   . -#%@@@@@@@@@@",
+        "@@@@@@@%*.     .                 .  ..   #@@@@@@@",
+        "@@@@%*    . .   .         .   ..      .   . #@@@@",
+        "@@%         .    ....::-----:::::.    .       :%@",
+        "% .       . . .::-----::::::--::---:. .       . .",
+        " . .       ..:---::::-:::::::::::----:      .  . ",
+        ". .    .....::--:::....::.....::..:-=-:          ",
+        "        :---::::::..........::::-::--=-..      . ",
+        "   .   .-=====--:..:....:--=====-==---=-.  .... .",
+        "    .   :=*****=:......--=+*******+-:--=-. .     ",
+        "      ..:+*****+-.....:-****+++***+---===: .. .  ",
+        "    .   -+****+=:......-======+***=---==+=.   .  ",
+        "       .---==--:::....:...::--------==+++=.      ",
+        "        :-==-----:..:-::...:-----===++=++=     . ",
+        "      . .--=-==========-:...:-====+*==+*+:.      ",
+        "         .---:-===--===-:::::---==+****+:        ",
+        ".  .  .   :===-.......:::-====++===+***-. .      ",
+        "   .     ..=+*=::...:--=+*********+***-   .    . ",
+        "            -+*+=---++++************+:.          ",
+        " .        . . .+*******************=  . .      . ",
+        "   .    .       :+***************+-             .",
+        "                  .=**+*******+-   .  ...      . ",
+        "    .    .    .    .=***++++-:.  . .             ",
+        "               .    .-+++---.      ..            ",
+        "          ...   . . ...:::-- .  . ....:...:....  ",
+        "  .         ..     ..:....==:.. .:...............",
+        "          ..+***++**++--::==-..--...:====-:......",
+        "      .. . .  :+*++======-===----:..:-==+*+==::..",
+        "   . .      .. .======--::.:-====-::.:-=====+----"
+    ]
+    
+    # Calculate center padding for the art
+    max_art_width = max(len(line) for line in art_lines)
+    art_padding = " " * ((80 - max_art_width) // 2)
+    
     print("\033[1;92m")  # Bright green color
-    print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%#*-......................................=*#%@@@@@@@@@@@@@@@@@@@@@@@@@@")
-    print("@@@@@@@@@@@@@@@@@@@@@@@%#=:................................................-+#%@@@@@@@@@@@@@@@@@@@@@")
-    print("@@@@@@@@@@@@@@@@@@@%#-..........................................................=#%@@@@@@@@@@@@@@@@@")
-    print("@@@@@@@@@@@@@@@@#+.................................................................:*%@@@@@@@@@@@@@@")
-    print("@@@@@@@@@@@@%#=........................................................................+%@@@@@@@@@@@")
-    print("@@@@@@@@@@%+..............................::::-----=---=--:::.............................#%@@@@@@@@")
-    print("@@@@@@@%*:..........................:::-:----====++++++++====----::::.......................-#@@@@@@")
-    print("@@@@@%+..........................::-==============++++++++==+++++++==-:::.....................:#%@@@")
-    print("@@@%=........................:---===+++====================++++++++++++==:.......................*%@")
-    print("@%+.......................:-===+++++++============================+++++*++=-:......................*")
-    print("+.....................::::-==++++++==================================++++++=-:......................")
-    print("..................::-----====+++=====================================+++++++==-:....................")
-    print("................::-========+++++==============================--=======++***++=-:...................")
-    print("...............:--===========+++==========---========----------------===++***+==-:..................")
-    print("..............::-=++++================--===--===-----------------==--====++****=-:..................")
-    print("..............:-==+**++++==================-======--=============+++====++++***+=-:.................")
-    print("..............:=++********+================-==============+++++***++++++++++****+=-:................")
-    print("..............:-=***##*****++++=====================++++****************+++++****+=::...............")
-    print("..............:-=+*############*+=--==============++*****#############**+===++****+=-:..............")
-    print("..............:-=+**###########*+===========-===++++*#################**++===+****++-:..............")
-    print("..............:-=+*#############*++=----==----=++######################**++++******++-:.............")
-    print("..............:-=+*#############**+=----------=+*######################*++++++******+=::............")
-    print("..............:-=+*############*+==-----------=+*########****##########*++++***##****+=:............")
-    print("..............:-=+*############*+==----------==++*##**********########**++++*******#*+=:............")
-    print(".............::-=+*########***+==-------=------==++++****###########**++++++****#####+=:............")
-    print(".............::-=+*****##*++++=========------========+++++*******+++++++++****######*+=:............")
-    print(".............::-=++++++**++======+=======-=========--=====+++=======++++**#*****####*+=:............")
-    print("..............:-=+++++*++++++==========-==========--======++=++===++++++*#####***###*+=:............")
-    print("...............:-=++***++++++++++=====---===========---=====++++++++*****##*###*###*+=-.............")
-    print("................:-++****+++++++*+++++++=++++++======--=-====+++++++**#######**#####*+=:.............")
-    print("................:-==++**+++++****########*****++==============++++****###****#####*+=-:.............")
-    print("..................:==+*+++==++*****##**********+==============++++++**############*=:...............")
-    print("..................:-=++*+++=+=++=====----=====+=============++++++****###########*=:................")
-    print("..................:-=++***+++===------------=====-==++++++*+***********#########+=-.................")
-    print("...................:-=+*##**+++==------------==+++++*****########*#***##########+=:.................")
-    print("....................:-+######*+==---------==-=+**##############################*=:..................")
-    print("....................:-=+#####*++===------=++++***############################*=:....................")
-    print("......................:-+*#####***=======+*******###########################*=-.....................")
-    print("......................:-+***######*++****#################################*+=-:.....................")
-    print("........................:-+*+*###########################################+=-:.......................")
-    print("..........................:---+#########################################*+=:........................")
-    print(".............................::=+#####################################+=-::.........................")
-    print("..............................:--=*##################################*+=:...........................")
-    print("..................................:-+###############################*-:.............................")
-    print("....................................:=***#####################***===-...............................")
-    print("......................................:-=*###################+=-:...................................")
-    print(".......................................:=*##############****+-:.....................................")
-    print(".......................................:-=*#######****##*+-::.......................................")
-    print("........................................:-++*#####*+++**+=:..............:::::::::::................")
-    print("........................................:-===++****+=++*+=::..........:::------------:::::::......:.")
-    print(".......................................::--=====++==++*++-:........::--------===========----:::::::")
-    print(".......................................::----=======++**+=-::.....:----------------=========--------")
-    print(".......................::.:::::::::..:----==--------=++***+-:::::--===----------------------====--==")
-    print(".....................:-==++***++++===+***+++=------==+***+==---=====-------===-----------------====-")
-    print(".............:.......:-=+*################***+=======++++++====++++=------==++++++++====--------=--")
-    print("......................:-+*####################****+++++*++======+++=-----===+****##**+++==----------")
-    print(".........................-=++*##########*####****+++=+****+++=+++++=========++***#####*****+=-------")
-    print("..........................:::-+#####**********++++=++++++++++++++++=====-===+++**#****####****++++")
-    print(".....................::......:-+**#****#****+++++========++++++++++++===---===+++**#****####****++++")
+    for line in art_lines:
+        print(art_padding + line)
     print("\033[0m")  # Reset color
     
-    # Text logo
-    print("\033[1;96m")  # Bright cyan
-    print("   ________.__  __ __________               __           __                   .__ ")
-    print("  /  _____/|__|/  |\\______   \\ ____   ____ |  | __ _____/  |_          _____  |__|")
-    print(" /   \\  ___|  \\   __\\       _//  _ \\_/ ___\\|  |/ // __ \\   __\\  ______ \\__  \\ |  |")
-    print(" \\    \\_\\  \\  ||  | |    |   (  <_> )  \\___|    <\\  ___/|  |   /_____/  / __ \\|  |")
-    print("  \\______  /__||__| |____|_  /\\____/ \\___  >__|_ \\\\___  >__|           (____  /__|")
-    print("         \\/                \\/            \\/     \\/    \\/                    \\/")
+    # Center the GitRocket AI text logo
+    text_logo_lines = [
+        "    ___ _ _                  _        _              _ ",
+        "   / _ (_) |_ _ __ ___   ___| | _____| |_       __ _(_)",
+        "  / /_\\/ | __| '__/ _ \\ / __| |/ / _ \\ __|____ / _` | |",
+        " / /_\\\\| | |_| | | (_) | (__|   <  __/ ||_____| (_| | |",
+        " \\____/|_|\\__|_|  \\___/ \\___|_|\\_\\___|\\__|     \\__,_|_|",
+        "                                                      "
+    ]
+    
+    # Calculate center padding for the text logo
+    max_text_width = max(len(line) for line in text_logo_lines)
+    text_padding = " " * ((80 - max_text_width) // 2)
+    
+    print("\033[1;92m")  # Bright green color
+    for line in text_logo_lines:
+        print(text_padding + line)
     print("\033[0m")
     
-    print("\033[1;95m" + " " * 20 + "🚀 GitRocket-AI Free Terminal Assistant v1.0 🚀" + " " * 20 + "\033[0m")
+    print("")
+    
+    # Centered version text
+    version_text = "🚀 GitRocket-AI Free Terminal Assistant v1.0 🚀"
+    version_padding = " " * ((80 - len(version_text)) // 2)
+    print(version_padding + "\033[1;95m" + version_text + "\033[0m")
     print("")
     
     # Centered description with border
@@ -457,6 +755,7 @@ def display_intro():
     empty_line = "│" + " " * (len(description) + 2) + "│"
     text_line = "│ " + description + " │"
     padding = " " * ((80 - len(border_line)) // 2)
+    
     print(padding + "\033[1;35m" + border_line + "\033[0m")
     print(padding + "\033[1;35m" + empty_line + "\033[0m")
     print(padding + "\033[1;35m" + text_line + "\033[0m")
@@ -491,48 +790,6 @@ def display_thinking():
         time.sleep(0.4)
         print("\033[1;90m.\033[0m", end="", flush=True)
     print("")
-
-def change_model(config):
-    """Change the model"""
-    print("\033[1;36m")
-    print("┌─────────────────────────────────────────────────────┐")
-    print("│ 🤖 Change Model │")
-    print("└─────────────────────────────────────────────────────┘")
-    print("\033[0m")
-    print("⏳ Fetching available models...")
-    models = get_available_models(config['api_key'])
-    if not models:
-        print("❌ Could not fetch models. Please check your API key.")
-        return config
-    
-    print("")
-    print("Available GitRocket-AI FREE models (first 10):")
-    print("")
-    for i, model in enumerate(models[:10], 1):
-        print(f"\033[1;36m{i}. {model['id']}\033[0m")
-        print(f"\033[1;33m Context: {model['context_length']} tokens\033[0m")
-        if model['description']:
-            desc = model['description']
-            if len(desc) > 70:
-                desc = desc[:67] + "..."
-            print(f"\033[0;97m Description: {desc}\033[0m")
-        print("")
-    
-    while True:
-        try:
-            choice = input(f"Select model (1-{len(models[:10])}) or 'c' to cancel: ").strip().lower()
-            if choice == 'c':
-                print("Model change cancelled.")
-                return config
-            elif choice.isdigit() and 1 <= int(choice) <= len(models[:10]):
-                selected_model = models[int(choice) - 1]
-                config['model'] = selected_model['id']
-                print(f"✅ Model changed to: {selected_model['id']}")
-                return config
-            else:
-                print(f"❌ Please enter a number between 1 and {len(models[:10])} or 'c' to cancel")
-        except (ValueError, IndexError):
-            print("❌ Invalid selection.")
 
 def change_api_key(config):
     """Change the API key"""

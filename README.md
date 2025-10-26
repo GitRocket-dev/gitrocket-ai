@@ -2,14 +2,7 @@
 
 <div align="center">
 
-```bash
-        .__  __                        __           __                   .__ 
-   ____ |__|/  |________  ____   ____ |  | __ _____/  |_          _____  |__|
-  / ___\|  \   __\_  __ \/  _ \_/ ___\|  |/ // __ \   __\  ______ \__  \ |  |
- / /_/  >  ||  |  |  | \(  <_> )  \___|    <\  ___/|  |   /_____/  / __ \|  |
- \___  /|__||__|  |__|   \____/ \___  >__|_ \\___  >__|           (____  /__|
-/_____/                             \/     \/    \/                    \/    
-```
+![GitRocket AI Logo](https://via.placeholder.com/800x200/000000/FFFFFF?text=GitRocket+AI+Terminal+Assistant)
 
 **Access 52+ FREE AI Models | Built-in Diagnostics | API Debugger**
 
