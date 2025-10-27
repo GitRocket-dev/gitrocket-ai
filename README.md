@@ -7,6 +7,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-API-green.svg)](https://openrouter.ai)
+[![Groq](https://img.shields.io/badge/Groq-API-violet.svg)](https://groq.com/)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Models-purple.svg)](https://huggingface.co/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Free](https://img.shields.io/badge/Free-Tier-success.svg)](https://openrouter.ai)
 
@@ -322,6 +324,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 *Start your AI journey today with GitRocket-AI!*
 
 </div>
+
 
 
 
