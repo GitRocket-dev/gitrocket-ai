@@ -36,6 +36,22 @@
 - **Search & Filter** - Find the perfect model for your needs
 - **Configuration Management** - Easy settings customization
 
+<img width="748" height="972" alt="SCR-20251027-oubf" src="https://github.com/user-attachments/assets/5e4097a1-13ce-45a9-9ade-57586b7cfdb0" />
+
+![SCR-20251027-ovqs](https://github.com/user-attachments/assets/21d7c0e9-32b0-4345-861c-b906bc0a2ad4)
+
+![SCR-20251027-oulz](https://github.com/user-attachments/assets/1ba107b3-0792-40cc-8044-fd10f1544048)
+
+![SCR-20251027-ousf](https://github.com/user-attachments/assets/22b468cc-9888-44fd-86b0-0860182b72ba)
+
+![SCR-20251027-ouxh](https://github.com/user-attachments/assets/0da7c9fb-20a6-4a88-906e-eab1a9ec23e8)
+
+![SCR-20251027-oxds](https://github.com/user-attachments/assets/24cb7986-5594-444b-83a6-e03ad76e7fe3)
+
+
+
+
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -306,5 +322,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 *Start your AI journey today with GitRocket-AI!*
 
 </div>
+
 
 
